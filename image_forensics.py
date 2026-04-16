@@ -742,6 +742,67 @@ class ImageForensicsDetector:
         return score
 
     # ═════════════════════════════════════════════════════════════════════════
+    # COMBINED SPATIAL HEATMAP
+    #    Fuses per-pixel evidence maps from each technique into one heatmap
+    #    showing WHERE in the image the tampering is most likely located.
+    # ═════════════════════════════════════════════════════════════════════════
+    def get_combined_heatmap(self) -> np.ndarray:
+        """
+        Returns a float32 heatmap (same H×W as input image, values 0–1)
+        showing the spatial distribution of tampering evidence.
+        Each technique's spatial map is weighted by its suspicion score
+        and accumulated into the final heatmap.
+        """
+        h, w = self.gray.shape
+        heatmap = np.zeros((h, w), dtype=np.float32)
+        count   = np.zeros((h, w), dtype=np.float32)
+
+        def _add(arr, weight):
+            if arr is None:
+                return
+            m = np.asarray(arr, dtype=np.float32)
+            if m.shape != (h, w):
+                m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+            lo, hi = m.min(), m.max()
+            if hi > lo:
+                m = (m - lo) / (hi - lo)
+            heatmap[:] += m * weight
+            count[:]   += weight
+
+        # Contribute each technique's spatial map
+        if "ela" in self.results:
+            _add(self.results["ela"]["gray"],            self.scores.get("ela", 0) * 0.20)
+        if "jpeg" in self.results:
+            _add(self.results["jpeg"]["artifact"],       self.scores.get("jpeg", 0) * 0.15)
+        if "noise" in self.results:
+            _add(self.results["noise"]["noise_map"],     self.scores.get("noise", 0) * 0.15)
+        if "edge" in self.results:
+            _add(self.results["edge"]["suspicious"].astype(np.float32),
+                                                         self.scores.get("edge", 0) * 0.10)
+        if "copy_move" in self.results:
+            _add(self.results["copy_move"]["map"].astype(np.float32),
+                                                         self.scores.get("copy_move", 0) * 0.10)
+        if "dft" in self.results:
+            _add(self.results["dft"]["residual"],        self.scores.get("dft", 0) * 0.05)
+        if "spatial" in self.results:
+            _add(self.results["spatial"]["sharpness_anom"].astype(np.float32),
+                                                         self.scores.get("spatial", 0) * 0.05)
+        if "morph" in self.results:
+            _add(self.results["morph"]["top_hat"],       self.scores.get("morph", 0) * 0.03)
+
+        # Normalise
+        mask = count > 0
+        heatmap[mask] /= count[mask]
+
+        # Smooth to reduce noise
+        heatmap = cv2.GaussianBlur(heatmap, (15, 15), 0)
+        lo, hi = heatmap.min(), heatmap.max()
+        if hi > lo:
+            heatmap = (heatmap - lo) / (hi - lo)
+
+        return heatmap
+
+    # ═════════════════════════════════════════════════════════════════════════
     # RUN ALL
     # ═════════════════════════════════════════════════════════════════════════
     def run_all(self, verbose: bool = True) -> tuple:
